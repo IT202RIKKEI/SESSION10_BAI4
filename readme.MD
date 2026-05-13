@@ -1,24 +1,64 @@
-sử dụng 2 mục index riêng
-bắt buộc
- -- '-> Filter: (pharmacy_inventory.Expiry_Date = DATE\'2025-08-20\')  (cost=0.275 rows=0.25) (actual time=0.0503..0.0523 rows=1 loops=1)\n    -> Index lookup on Pharmacy_Inventory using idx_Drug_Name (Drug_name=\'Panadol Extra\')  (cost=0.275 rows=1) (actual time=0.0481..0.05 rows=1 loops=1)\n'
+USE SESSION10;
 
-Chúng ta sẽ thấy chữ filter, có nghĩa là nó sẽ phải lọc ra trước rồi mới tìm kiếm -> Nó tra cuốn 1 để lấy ra một rổ thuốc Panadol. Sau đó, nó phải cặm cụi lật đít từng hộp thuốc trong rổ đó lên để kiểm tra "bằng tay" xem hộp nào có hạn sử dụng đúng yêu cầu.
+-- ====================================================
+-- 1. KHỞI TẠO BẢNG VÀ CHÈN DỮ LIỆU
+-- ====================================================
+CREATE TABLE Pharmacy_Inventory (
+    Inventory_ID INT AUTO_INCREMENT,
+    Drug_name VARCHAR(255) NOT NULL,
+    Batch_Number VARCHAR(50),
+    Expiry_Date DATE NOT NULL,
+    Quantity INT NOT NULL,
+    CONSTRAINT PK_Inventory_ID PRIMARY KEY(Inventory_ID),
+    CONSTRAINT CK_Quantity CHECK(Quantity >= 0)
+);
 
+INSERT INTO Pharmacy_Inventory (Drug_name, Batch_Number, Expiry_Date, Quantity) VALUES 
+('Paracetamol 500mg', 'P101', '2026-12-31', 1000),
+('Paracetamol 250mg', 'P102', '2026-10-15', 500),
+('Panadol Extra', 'P103', '2025-08-20', 2000),
+('Amoxicillin Khang Sinh', 'A200', '2024-12-01', 300);
 
-còn sử dụng composite index cho tên thuốc và hạn sử dụng
+-- ====================================================
+-- 2. CHỨNG MINH HIỆU QUẢ CỦA COMPOSITE INDEX 
+-- ====================================================
 
--- -> Index lookup on Pharmacy_Inventory using idx_Drug_Name_Expiry_Date (Drug_name='Panadol Extra', Expiry_Date=DATE'2025-08-20')  (cost=0.35 rows=1) (actual time=0.0572..0.059 rows=1 loops=1)
+-- Test 1: Khi đánh 2 Index đơn độc lập
+CREATE INDEX idx_Drug_Name ON Pharmacy_Inventory(Drug_name);
+CREATE INDEX idx_Expiry_Date ON Pharmacy_Inventory(Expiry_Date);
 
+EXPLAIN ANALYZE SELECT * FROM Pharmacy_Inventory WHERE Drug_name = 'Panadol Extra' AND Expiry_Date = '2025-08-20';
 
-nó chỉ có index nghĩa là nó k cần phải lọc ra điều kiện nữa, sẽ tối ưu hơn, với lại thằng composite sẽ hoạt động như thế này, nó sẽ dựa vào mục lục lướt đến chỗ nào có chữ panadol, xong sau đó nó liếc qua kiếm ngày là 2025-08-20 và sau đó nó sẽ nhảy thẳng đến chỗ của thằng đó và lấy nó ra
+/* PHÂN TÍCH TEST 1:
+Kết quả EXPLAIN trả về có bước: -> Filter: (Expiry_Date = DATE'2025-08-20')
+Điều này chứng tỏ máy tính tra mục lục Tên thuốc (Index lookup), nhưng sau đó phải chạy thêm một thao tác lọc thủ công (Filter) để đối chiếu ngày tháng, rất tốn tài nguyên nếu bảng có hàng triệu dòng.
+*/
 
-Về mặt thời gian đo được (0.050ms vs 0.057ms): Lúc test với bảng dữ liệu siêu nhỏ (vài dòng), thời gian chạy của Composite Index đôi khi có vẻ nhỉnh hơn vài mili-giây so với Index đơn. Lý do là vì "cây" Composite to hơn nên tốn một chút chi phí khởi tạo (cost) vào RAM. Nhưng đây chỉ là "ảo giác vật lý" của dữ liệu nhỏ.
+-- Dọn dẹp Index đơn để chuẩn bị test Index gộp
+DROP INDEX idx_Drug_Name ON Pharmacy_Inventory;
+DROP INDEX idx_Expiry_Date ON Pharmacy_Inventory;
 
-Chốt hạ: Bằng chứng từ EXPLAIN cho thấy Composite Index đã triệt tiêu hoàn toàn bước lọc phụ (Filter). Nếu áp dụng trên Big Data (hàng triệu dòng), Composite Index chắc chắn là người chiến thắng tuyệt đối khi truy vấn bằng mệnh đề AND.
+-- Test 2: Khi đánh 1 Composite Index (Chỉ mục kết hợp)
+CREATE INDEX idx_Drug_Name_Expiry_Date ON Pharmacy_Inventory(Drug_name, Expiry_Date);
 
+EXPLAIN ANALYZE SELECT * FROM Pharmacy_Inventory WHERE Drug_name = 'Panadol Extra' AND Expiry_Date = '2025-08-20';
 
-Giải thích hiện tượng Index bị "vô hiệu hóa" khi sử dụng LIKE '%keyword%'.
+/* PHÂN TÍCH TEST 2:
+Kết quả EXPLAIN chỉ có duy nhất: -> Index lookup on Pharmacy_Inventory using idx_Drug_Name_Expiry_Date
+Bước 'Filter' thủ công ĐÃ HOÀN TOÀN BIẾN MẤT. Hệ thống chỉ cần tra 1 cuốn mục lục (B-Tree) là lấy ra ngay dòng kết quả chính xác. Chứng tỏ Composite Index tối ưu hơn hẳn trong việc tìm kiếm đa điều kiện (AND).
+*/
 
-Trường hợp index mạnh nhất khi sử dụng like là 'chu%', tại vì máy tính biết nó bắt đầu bằng chữ gì nên có thể dựa vào đó mà đến khu vực có những thằng bắt đầu bằng chu để kiếm luôn
+-- ====================================================
+-- 3. PHÂN TÍCH VÀ XỬ LÝ LỖI KHI DÙNG LIKE '%keyword%'
+-- ====================================================
 
-%keyword% Vì có dấu % ở đầu, máy tính "bó tay" không biết chữ cái bắt đầu của tên thuốc là gì (có thể là A, có thể là B...). Không biết điểm xuất phát, nó đành vứt cuốn mục lục đi và chạy xuống kho lật từng hộp thuốc lên để xem có chữ "mol" hay không
+/*
+A. GIẢI THÍCH HIỆN TƯỢNG INDEX BỊ VÔ HIỆU HÓA:
+- Cơ chế của B-Tree Index là sắp xếp dữ liệu từ trái sang phải.
+- Nếu tìm kiếm LIKE 'Para%', máy biết chữ cái bắt đầu là 'P' nên dùng Index tìm rất nhanh (Prefix matching).
+- Nếu tìm kiếm LIKE '%mol%', máy không biết chữ cái bắt đầu của thuốc là gì, dẫn đến lạc lối. Nó buộc phải bỏ Index và quét toàn bộ bảng (Full Table Scan). Lúc này Index trở nên vô dụng.
+
+B. ĐỀ XUẤT GIẢI PHÁP TỐI ƯU:
+- Giải pháp 1 (Tối ưu cấu trúc LIKE): Chặn người dùng đặt dấu % ở đầu chuỗi. Bắt buộc tìm kiếm theo tiền tố (VD: Chỉ cho phép truy vấn LIKE 'Từ_khóa%').
+- Giải pháp 2 (Nâng cấp toàn diện): Thay vì dùng Index thông thường, ta chuyển cột Drug_name sang dùng FULLTEXT INDEX. Lúc này có thể dùng cú pháp MATCH(Drug_name) AGAINST('mol') để tìm kiếm ở bất kỳ vị trí nào mà tốc độ vẫn cực kỳ nhanh.
+*/
